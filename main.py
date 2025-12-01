@@ -5,7 +5,7 @@ FastAPI 기반 REST API 서버
 from fastapi import FastAPI, HTTPException, WebSocket, WebSocketDisconnect
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, Field
-from typing import List, Dict, Optional
+from typing import List, Dict, Optional, Set
 import asyncio
 import json
 from datetime import datetime
@@ -20,6 +20,9 @@ from keysight_driver import KeysightE36313ADriver, ChannelData
 driver: Optional[KeysightE36313ADriver] = None
 import os
 db_path = Path(os.getenv("DATABASE_PATH", "power_supply_logs.db"))
+
+# 활성 WebSocket 연결 추적
+active_channels: Set[int] = set()
 
 
 # ========== Database 초기화 ==========
@@ -118,8 +121,10 @@ class ConnectionConfig(BaseModel):
     timeout: int = Field(5000, ge=1000, le=30000)
 
 
-class ChannelSetting(BaseModel):
+class voltageSetting(BaseModel):
     voltage: float = Field(..., ge=0)
+    
+class currentSetting(BaseModel):
     current: float = Field(..., ge=0)
 
 
@@ -213,7 +218,7 @@ async def get_status():
 
 # ========== 측정 API ==========
 
-@app.get("/measure/channel/{channel}", response_model=MeasurementResponse)
+@app.get("/measure/{channel}", response_model=MeasurementResponse)
 async def measure_channel(channel: int):
     """개별 채널 측정"""
     if not driver or not driver.is_connected():
@@ -244,40 +249,40 @@ async def measure_channel(channel: int):
         raise HTTPException(status_code=500, detail=str(e))
 
 
-@app.get("/measure/all")
-async def measure_all_channels():
-    """전체 채널 일괄 측정"""
-    if not driver or not driver.is_connected():
-        raise HTTPException(status_code=400, detail="Not connected")
-    
-    try:
-        results = driver.measure_all_channels()
-        
-        # 데이터베이스 저장
-        for data in results.values():
-            save_to_database(data)
-        
-        response = {}
-        for ch, data in results.items():
-            response[ch] = {
-                "channel": data.channel,
-                "voltage": data.voltage,
-                "current": data.current,
-                "power": data.voltage * data.current,
-                "timestamp": data.timestamp,
-                "datetime": datetime.fromtimestamp(data.timestamp).isoformat()
-            }
-        
-        return response
-        
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
+# @app.get("/measure/all")
+# async def measure_all_channels():
+#     """전체 채널 일괄 측정"""
+#     if not driver or not driver.is_connected():
+#         raise HTTPException(status_code=400, detail="Not connected")
+#     
+#     try:
+#         results: Dict[int, ChannelData] = driver.measure_all_channels()
+#         
+#         # 데이터베이스 저장
+#        for data in results.values():
+#             save_to_database(data)
+#         
+#         response = {"channels": []}
+#         for ch, data in results.items():
+#             response["channels"].append({
+#                 "channel": data.channel,
+#                 "voltage": data.voltage,
+#                 "current": data.current,
+#                 "power": round(data.voltage * data.current, 6),  # 소수점 안정성
+#                 "timestamp": data.timestamp,
+#                 "datetime": datetime.fromtimestamp(data.timestamp).isoformat()
+#             })
+#         
+#         return response
+#         
+#     except Exception as e:
+#         raise HTTPException(status_code=500, detail=f"Measurement error: {str(e)}")
 
 
 # ========== 설정 API ==========
 
 @app.post("/set/volt/{channel}")
-async def set_channel_volt(channel: int, setting: ChannelSetting):
+async def set_voltage(channel: int, setting: voltageSetting):
     """개별 채널 전압 설정"""
     if not driver or not driver.is_connected():
         raise HTTPException(status_code=400, detail="Not connected")
@@ -293,7 +298,7 @@ async def set_channel_volt(channel: int, setting: ChannelSetting):
                 detail=f"Voltage exceeds max ({driver.MAX_VOLTAGE[channel]}V)"
             )
         
-        success = driver.set_channel(channel, setting.voltage)
+        success = driver.set_voltage(channel, setting.voltage)
         
         if success:
             return {
@@ -310,7 +315,7 @@ async def set_channel_volt(channel: int, setting: ChannelSetting):
         raise HTTPException(status_code=500, detail=str(e))
     
 @app.post("/set/current/{channel}")
-async def set_channel_current(channel: int, setting: ChannelSetting):
+async def set_current(channel: int, setting: currentSetting):
     """개별 채널 전류 설정"""
     if not driver or not driver.is_connected():
         raise HTTPException(status_code=400, detail="Not connected")
@@ -326,7 +331,7 @@ async def set_channel_current(channel: int, setting: ChannelSetting):
                 detail=f"Current exceeds max ({driver.MAX_CURRENT[channel]}A)"
             )
         
-        success = driver.set_channel_current(channel, setting.current)
+        success = driver.set_current(channel, setting.current)
         
         if success:
             return {
@@ -343,69 +348,69 @@ async def set_channel_current(channel: int, setting: ChannelSetting):
         raise HTTPException(status_code=500, detail=str(e))
 
 
-@app.post("/set/volt/all")
-async def set_all_channels(setting: AllChannelsSetting):
-    """전체 채널 일괄 설정"""
-    if not driver or not driver.is_connected():
-        raise HTTPException(status_code=400, detail="Not connected")
-    
-    try:
-        # 범위 체크
-        for ch in range(1, 4):
-            if setting.voltages[ch-1] > driver.MAX_VOLTAGE[ch]:
-                raise HTTPException(
-                    status_code=400,
-                    detail=f"CH{ch} voltage exceeds max ({driver.MAX_VOLTAGE[ch]}V)"
-                )
-        
-        results = driver.set_all_channels(setting.voltages, setting.currents)
-        
-        return {
-            "status": "success" if all(results.values()) else "partial",
-            "results": results,
-            "settings": {
-                "voltages": setting.voltages
-            }
-        }
-        
-    except HTTPException:
-        raise
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
+# @app.post("/set/volt/all")
+# async def set_all_channels(setting: AllChannelsSetting):
+#     """전체 채널 일괄 설정"""
+#     if not driver or not driver.is_connected():
+#         raise HTTPException(status_code=400, detail="Not connected")
+#     
+#     try:
+#         # 범위 체크
+#         for ch in range(1, 4):
+#             if setting.voltages[ch-1] > driver.MAX_VOLTAGE[ch]:
+#                 raise HTTPException(
+#                     status_code=400,
+#                     detail=f"CH{ch} voltage exceeds max ({driver.MAX_VOLTAGE[ch]}V)"
+#                 )
+#         
+#         results = driver.set_all_channels(setting.voltages, setting.currents)
+#         
+#         return {
+#             "status": "success" if all(results.values()) else "partial",
+#             "results": results,
+#             "settings": {
+#                 "voltages": setting.voltages
+#             }
+#         }
+#         
+#     except HTTPException:
+#         raise
+#     except Exception as e:
+#         raise HTTPException(status_code=500, detail=str(e))
 
-@app.post("/set/current/all")
-async def set_all_channels_current(setting: AllChannelsSetting):
-    """전체 채널 일괄 전류 설정"""
-    if not driver or not driver.is_connected():
-        raise HTTPException(status_code=400, detail="Not connected")
-    
-    try:
-        # 범위 체크
-        for ch in range(1, 4):
-            if setting.currents[ch-1] > driver.MAX_CURRENT[ch]:
-                raise HTTPException(
-                    status_code=400,
-                    detail=f"CH{ch} current exceeds max ({driver.MAX_CURRENT[ch]}A)"
-                )
-        
-        results = driver.set_all_channels_current(setting.currents)
-        
-        return {
-            "status": "success" if all(results.values()) else "partial",
-            "results": results,
-            "settings": {
-                "currents": setting.currents
-            }
-        }
-        
-    except HTTPException:
-        raise
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
+# @app.post("/set/current/all")
+# async def set_all_channels_current(setting: AllChannelsSetting):
+#     """전체 채널 일괄 전류 설정"""
+#     if not driver or not driver.is_connected():
+#         raise HTTPException(status_code=400, detail="Not connected")
+#     
+#     try:
+#         # 범위 체크
+#         for ch in range(1, 4):
+#             if setting.currents[ch-1] > driver.MAX_CURRENT[ch]:
+#                 raise HTTPException(
+#                     status_code=400,
+#                     detail=f"CH{ch} current exceeds max ({driver.MAX_CURRENT[ch]}A)"
+#                 )
+#         
+#         results = driver.set_all_channels_current(setting.currents)
+#         
+#         return {
+#             "status": "success" if all(results.values()) else "partial",
+#             "results": results,
+#             "settings": {
+#                 "currents": setting.currents
+#             }
+#         }
+#         
+#     except HTTPException:
+#         raise
+#     except Exception as e:
+#         raise HTTPException(status_code=500, detail=str(e))
 
 # ========== 출력 제어 API ==========
 
-@app.post("/output/channel/{channel}/{state}")
+@app.post("/output/{channel}/{state}")
 async def set_output(channel: int, state: bool):
     """개별 채널 출력 ON/OFF"""
     if not driver or not driver.is_connected():
@@ -432,64 +437,89 @@ async def set_output(channel: int, state: bool):
         raise HTTPException(status_code=500, detail=str(e))
 
 
-@app.post("/output/all/{state}")
-async def set_all_outputs(state: bool):
-    """전체 채널 출력 일괄 ON/OFF"""
-    if not driver or not driver.is_connected():
-        raise HTTPException(status_code=400, detail="Not connected")
-    
-    try:
-        results = driver.set_all_outputs(state)
-        
-        return {
-            "status": "success" if all(results.values()) else "partial",
-            "output": "ON" if state else "OFF",
-            "results": results
-        }
-        
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
+# @app.post("/output/all/{state}")
+# async def set_all_outputs(state: bool):
+#     """전체 채널 출력 일괄 ON/OFF"""
+#     if not driver or not driver.is_connected():
+#         raise HTTPException(status_code=400, detail="Not connected")
+#     
+#     try:
+#         results = driver.set_all_outputs(state)
+#         
+#         return {
+#             "status": "success" if all(results.values()) else "partial",
+#             "output": "ON" if state else "OFF",
+#             "results": results
+#         }
+#         
+#     except Exception as e:
+#         raise HTTPException(status_code=500, detail=str(e))
 
 
 # ========== WebSocket (실시간 모니터링) ==========
-
-@app.websocket("/ws/monitor")
-async def websocket_monitor(websocket: WebSocket):
-    """WebSocket을 통한 실시간 측정 데이터 스트리밍"""
+@app.websocket("/ws/monitor/{channel}")
+async def websocket_monitor_channel(websocket: WebSocket, channel: int):
+    """채널별 독립 WebSocket - 각 채널이 독립적으로 측정"""
+    
+    # 채널 번호 검증
+    if not 1 <= channel <= 3:
+        await websocket.close(code=1003, reason="Invalid channel (1-3)")
+        return
+    
     await websocket.accept()
+    active_channels.add(channel)
+    print(f"✓ WebSocket connected for channel {channel}")
+    print(f"  Active channels: {sorted(active_channels)}")
     
     try:
         while True:
             if driver and driver.is_connected():
                 try:
-                    # 전체 채널 측정
-                    results = driver.measure_all_channels()
+                    # 단일 채널만 측정 (독립적으로 빠르게)
+                    results = driver.measure_channel([channel])
                     
-                    # JSON 형태로 변환
-                    data = {}
-                    for ch, channel_data in results.items():
-                        data[ch] = {
+                    if channel in results:
+                        channel_data = results[channel]
+                        data = {
+                            "channel": channel,
                             "voltage": channel_data.voltage,
                             "current": channel_data.current,
                             "power": channel_data.voltage * channel_data.current,
                             "timestamp": channel_data.timestamp
                         }
-                    
-                    await websocket.send_json(data)
+                        await websocket.send_json(data)
+                    else:
+                        await websocket.send_json({
+                            "error": f"Channel {channel} measurement failed"
+                        })
                     
                 except Exception as e:
                     await websocket.send_json({"error": str(e)})
             else:
                 await websocket.send_json({"error": "Not connected"})
             
-            # 1초 대기 (1Hz 업데이트)
-            await asyncio.sleep(1.0)
+            # 고속 업데이트 (100ms = 10Hz)
+            await asyncio.sleep(0.1)
             
     except WebSocketDisconnect:
-        print("WebSocket client disconnected")
+        print(f"✗ WebSocket disconnected for channel {channel}")
     except Exception as e:
-        print(f"WebSocket error: {e}")
+        print(f"✗ WebSocket error for channel {channel}: {e}")
+    finally:
+        active_channels.discard(channel)
+        print(f"  Active channels: {sorted(active_channels)}")
 
+
+# ========== 활성 연결 상태 확인 API ==========
+
+@app.get("/ws/status")
+async def get_websocket_status():
+    """활성 WebSocket 연결 상태 확인"""
+    return {
+        "active_channels": sorted(list(active_channels)),
+        "total_connections": len(active_channels),
+        "connected": driver.is_connected() if driver else False
+    }
 
 # ========== 데이터 로그 조회 API ==========
 
@@ -527,7 +557,7 @@ async def get_recent_logs(limit: int = 100):
         raise HTTPException(status_code=500, detail=str(e))
 
 
-@app.get("/logs/channel/{channel}")
+@app.get("/logs/{channel}")
 async def get_channel_logs(
     channel: int, 
     limit: int = 100,

@@ -25,8 +25,8 @@ class KeysightE36313ADriver:
     """Keysight E36313A 전원공급장치 드라이버"""
     
     # 채널별 최대값 (E36313A 기준)
-    MAX_VOLTAGE = {1: 6.18, 2: 25.75, 3: 25.75}
-    MAX_CURRENT = {1: 10.3, 2: 2.06, 3: 2.06}
+    MAX_VOLTAGE = {1: 6.00, 2: 25.00, 3: 25.00}
+    MAX_CURRENT = {1: 10.0, 2: 2.00, 3: 2.00}
     
     def __init__(self, ip_address: str, timeout: int = 5000):
         """
@@ -86,14 +86,6 @@ class KeysightE36313ADriver:
         """연결 상태 확인"""
         return self._connected
     
-    def channel_on(self, channel: int) -> bool:
-        """채널 출력 ON"""
-        return self.set_output(channel, True)
-    
-    def channel_off(self, channel: int) -> bool:
-        """채널 출력 OFF"""
-        return self.set_output(channel, False)
-    
     def check_errors(self) -> List[str]:
         """에러 큐 확인"""
         errors = []
@@ -148,7 +140,7 @@ class KeysightE36313ADriver:
         except Exception as e:
             logger.error(f"Current measurement error (CH{channel}): {e}")
             return None
-    
+    '''
     def measure_channel(self, channel: int) -> Optional[ChannelData]:
         """개별 채널 전압/전류 동시 측정
         
@@ -186,8 +178,8 @@ class KeysightE36313ADriver:
         
         try:
             # 채널 리스트 형태로 일괄 측정 (성능 최적화)
-            voltages = self.instrument.query("MEAS:VOLT? (@1:3)").strip().split(',')
-            currents = self.instrument.query("MEAS:CURR? (@1:3)").strip().split(',')
+            voltages = self.instrument.query("MEAS:VOLT? CH{ch}").strip().split(',')
+            currents = self.instrument.query("MEAS:CURR? CH{ch}").strip().split(',')
             
             for ch in range(1, 4):
                 try:
@@ -209,6 +201,60 @@ class KeysightE36313ADriver:
                     results[ch] = data
         
         return results
+    '''
+
+    def measure_channel(self, channels: List[int]) -> Dict[int, ChannelData]:
+        """지정된 채널들 일괄 측정 (최적화 버전)
+        
+        Args:
+            channels: 측정할 채널 번호 리스트 (예: [1, 2, 3])
+            
+        Returns:
+            채널별 측정 데이터 딕셔너리
+        """
+        results = {}
+        timestamp = time.time()
+        
+        if not channels:
+            return results
+        
+        try:
+            # 채널 리스트 형태로 일괄 측정
+            channels_str = ','.join(str(ch) for ch in sorted(channels))
+            
+            # write/read 분리로 약간의 성능 향상
+            self.instrument.write(f"MEAS:VOLT? (@{channels_str})")
+            voltage_response = self.instrument.read().strip()
+            
+            self.instrument.write(f"MEAS:CURR? (@{channels_str})")
+            current_response = self.instrument.read().strip()
+            
+            voltages = voltage_response.split(',')
+            currents = current_response.split(',')
+            
+            for idx, ch in enumerate(sorted(channels)):
+                try:
+                    results[ch] = ChannelData(
+                        channel=ch,
+                        voltage=float(voltages[idx]),
+                        current=float(currents[idx]),
+                        timestamp=timestamp
+                    )
+                except (IndexError, ValueError) as e:
+                    logger.error(f"Parse error for CH{ch}: {e}")
+                    
+        except Exception as e:
+            logger.error(f"Batch measurement error: {e}")
+        
+        return results
+
+    def measure_all_channel(self) -> Dict[int, ChannelData]:
+        """전체 채널 일괄 측정
+        
+        Returns:
+            채널별 측정 데이터 딕셔너리
+        """
+        return self.measure_channel([1, 2, 3])
     
     # ========== 설정 함수 ==========
     
@@ -285,44 +331,6 @@ class KeysightE36313ADriver:
         except Exception as e:
             logger.error(f"Current setting error (CH{channel}): {e}")
             return False
-    
-    def set_channel(self, channel: int, voltage: float, current: float) -> bool:
-        """개별 채널 전압/전류 동시 설정
-        
-        Args:
-            channel: 채널 번호 (1-3)
-            voltage: 설정 전압 (V)
-            current: 설정 전류 (A)
-            
-        Returns:
-            성공 여부
-        """
-        v_success = self.set_voltage(channel, voltage)
-        c_success = self.set_current(channel, current)
-        return v_success and c_success
-    
-    def set_all_channels(
-        self, 
-        voltages: List[float], 
-        currents: List[float]
-    ) -> Dict[int, bool]:
-        """전체 채널 일괄 설정
-        
-        Args:
-            voltages: 채널 1~3 전압 리스트 [V]
-            currents: 채널 1~3 전류 리스트 [A]
-            
-        Returns:
-            채널별 설정 성공 여부 딕셔너리
-        """
-        if len(voltages) != 3 or len(currents) != 3:
-            raise ValueError("voltages and currents must have 3 elements")
-        
-        results = {}
-        for ch in range(1, 4):
-            results[ch] = self.set_channel(ch, voltages[ch-1], currents[ch-1])
-        
-        return results
     
     def set_output(self, channel: int, state: bool) -> bool:
         """개별 채널 출력 ON/OFF
