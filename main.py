@@ -1,7 +1,3 @@
-"""
-Keysight E36313A Power Supply Control Backend
-FastAPI 기반 REST API 서버
-"""
 from fastapi import FastAPI, HTTPException, WebSocket, WebSocketDisconnect
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, Field
@@ -18,59 +14,63 @@ from keysight_driver import KeysightE36313ADriver, ChannelData
 
 # ========== 전역 변수 ==========
 driver: Optional[KeysightE36313ADriver] = None
-import os
-db_path = Path(os.getenv("DATABASE_PATH", "power_supply_logs.db"))
+db_path = Path(os.getenv("DATABASE_PATH", "logs.db"))
 
 # 활성 WebSocket 연결 추적
 active_channels: Set[int] = set()
 
+# 로깅 활성화 설정
+logging_enabled: Dict[int, bool] = {1: True, 2: True, 3: True}
+
 
 # ========== Database 초기화 ==========
 def init_database():
-    """SQLite 데이터베이스 초기화"""
+    """SQLite 데이터베이스 초기화 - 채널별 테이블 생성"""
     conn = sqlite3.connect(db_path)
     cursor = conn.cursor()
     
-    cursor.execute("""
-        CREATE TABLE IF NOT EXISTS measurement_logs (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            timestamp REAL NOT NULL,
-            datetime TEXT NOT NULL,
-            channel INTEGER NOT NULL,
-            voltage REAL NOT NULL,
-            current REAL NOT NULL,
-            power REAL NOT NULL
-        )
-    """)
-    
-    cursor.execute("""
-        CREATE INDEX IF NOT EXISTS idx_timestamp 
-        ON measurement_logs(timestamp)
-    """)
-    
-    cursor.execute("""
-        CREATE INDEX IF NOT EXISTS idx_channel 
-        ON measurement_logs(channel)
-    """)
+    # 채널 1, 2, 3에 대해 각각 독립된 테이블 생성
+    for channel in [1, 2, 3]:
+        table_name = f"channel_{channel}"
+        
+        cursor.execute(f"""
+            CREATE TABLE IF NOT EXISTS {table_name} (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                timestamp REAL NOT NULL,
+                datetime TEXT NOT NULL,
+                voltage REAL NOT NULL,
+                current REAL NOT NULL,
+                power REAL NOT NULL
+            )
+        """)
+        
+        # 타임스탬프 인덱스
+        cursor.execute(f"""
+            CREATE INDEX IF NOT EXISTS idx_{table_name}_timestamp 
+            ON {table_name}(timestamp)
+        """)
+        
+        print(f"Table '{table_name}' initialized")
     
     conn.commit()
     conn.close()
 
 
 def save_to_database(data: ChannelData):
-    """측정 데이터 저장"""
+    """측정 데이터를 채널별 테이블에 저장"""
     try:
         conn = sqlite3.connect(db_path)
         cursor = conn.cursor()
         
-        cursor.execute("""
-            INSERT INTO measurement_logs 
-            (timestamp, datetime, channel, voltage, current, power)
-            VALUES (?, ?, ?, ?, ?, ?)
+        table_name = f"channel_{data.channel}"
+        
+        cursor.execute(f"""
+            INSERT INTO {table_name}
+            (timestamp, datetime, voltage, current, power)
+            VALUES (?, ?, ?, ?, ?)
         """, (
             data.timestamp,
             datetime.fromtimestamp(data.timestamp).isoformat(),
-            data.channel,
             data.voltage,
             data.current,
             data.voltage * data.current
@@ -80,7 +80,7 @@ def save_to_database(data: ChannelData):
         conn.close()
         
     except Exception as e:
-        print(f"Database save error: {e}")
+        print(f"Database save error (Channel {data.channel}): {e}")
 
 
 # ========== Lifespan 관리 ==========
@@ -89,7 +89,7 @@ async def lifespan(app: FastAPI):
     """애플리케이션 시작/종료 시 실행"""
     # Startup
     init_database()
-    print("Database initialized")
+    print("Database initialized with channel-specific tables")
     yield
     # Shutdown
     if driver and driver.is_connected():
@@ -100,7 +100,7 @@ async def lifespan(app: FastAPI):
 # ========== FastAPI 앱 초기화 ==========
 app = FastAPI(
     title="Keysight E36313A Control API",
-    description="Power Supply Control Backend",
+    description="Power Supply Control Backend with Channel-Specific Tables",
     version="1.0.0",
     lifespan=lifespan
 )
@@ -108,7 +108,7 @@ app = FastAPI(
 # CORS 설정
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],  # 프로덕션에서는 특정 origin으로 제한
+    allow_origins=["*"],
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
@@ -127,11 +127,9 @@ class voltageSetting(BaseModel):
 class currentSetting(BaseModel):
     current: float = Field(..., ge=0)
 
-
-class AllChannelsSetting(BaseModel):
-    voltages: List[float] = Field(..., min_items=3, max_items=3)
-    currents: List[float] = Field(..., min_items=3, max_items=3)
-
+class LoggingConfig(BaseModel):
+    channel: int = Field(..., ge=1, le=3)
+    enabled: bool
 
 class MeasurementResponse(BaseModel):
     channel: int
@@ -155,7 +153,8 @@ async def root():
     return {
         "name": "Keysight E36313A Control API",
         "version": "1.0.0",
-        "status": "running"
+        "status": "running",
+        "database_structure": "channel-specific tables (channel_1, channel_2, channel_3)"
     }
 
 
@@ -216,6 +215,7 @@ async def get_status():
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
+
 # ========== 측정 API ==========
 
 @app.get("/measure/{channel}", response_model=MeasurementResponse)
@@ -228,11 +228,14 @@ async def measure_channel(channel: int):
         raise HTTPException(status_code=400, detail="Invalid channel (1-3)")
     
     try:
-        data = driver.measure_channel(channel)
-        if data is None:
+        results = driver.measure_channel([channel])
+        
+        if channel not in results:
             raise HTTPException(status_code=500, detail="Measurement failed")
         
-        # 데이터베이스 저장
+        data = results[channel]
+        
+        # 채널별 테이블에 저장
         save_to_database(data)
         
         return MeasurementResponse(
@@ -261,7 +264,6 @@ async def set_voltage(channel: int, setting: voltageSetting):
         raise HTTPException(status_code=400, detail="Invalid channel (1-3)")
     
     try:
-        # 범위 체크
         if setting.voltage > driver.MAX_VOLTAGE[channel]:
             raise HTTPException(
                 status_code=400, 
@@ -283,6 +285,7 @@ async def set_voltage(channel: int, setting: voltageSetting):
         raise
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
+
     
 @app.post("/set/current/{channel}")
 async def set_current(channel: int, setting: currentSetting):
@@ -294,7 +297,6 @@ async def set_current(channel: int, setting: currentSetting):
         raise HTTPException(status_code=400, detail="Invalid channel (1-3)")
     
     try:
-        # 범위 체크
         if setting.current > driver.MAX_CURRENT[channel]:
             raise HTTPException(
                 status_code=400, 
@@ -347,10 +349,42 @@ async def set_output(channel: int, state: bool):
         raise HTTPException(status_code=500, detail=str(e))
 
 
-# ========== WebSocket (실시간 모니터링) ==========
+# ========== 로깅 제어 API ==========
+
+@app.post("/logging/config")
+async def configure_logging(config: LoggingConfig):
+    """채널별 로깅 활성화/비활성화"""
+    global logging_enabled
+    
+    if not 1 <= config.channel <= 3:
+        raise HTTPException(status_code=400, detail="Invalid channel (1-3)")
+    
+    logging_enabled[config.channel] = config.enabled
+    
+    return {
+        "status": "success",
+        "channel": config.channel,
+        "table_name": f"channel_{config.channel}",
+        "logging_enabled": config.enabled,
+        "message": f"Channel {config.channel} logging {'enabled' if config.enabled else 'disabled'}"
+    }
+
+
+@app.get("/logging/config")
+async def get_logging_config():
+    """현재 로깅 설정 조회"""
+    return {
+        "logging_config": logging_enabled,
+        "active_websockets": sorted(list(active_channels)),
+        "tables": ["channel_1", "channel_2", "channel_3"]
+    }
+
+
+# ========== WebSocket (실시간 모니터링 + 로깅) ==========
+
 @app.websocket("/ws/monitor/{channel}")
 async def websocket_monitor_channel(websocket: WebSocket, channel: int):
-    """채널별 독립 WebSocket - 각 채널이 독립적으로 측정"""
+    """채널별 독립 WebSocket - 각 채널이 독립 테이블에 저장"""
     
     if not 1 <= channel <= 3:
         await websocket.close(code=1003, reason="Invalid channel (1-3)")
@@ -358,8 +392,8 @@ async def websocket_monitor_channel(websocket: WebSocket, channel: int):
     
     await websocket.accept()
     active_channels.add(channel)
-    print(f"✓ WebSocket connected for channel {channel}")
-    print(f"  Active channels: {sorted(active_channels)}")
+    print(f"WebSocket connected for channel {channel} -> table: channel_{channel}")
+    print(f"Active channels: {sorted(active_channels)}")
     
     try:
         while True:
@@ -369,23 +403,39 @@ async def websocket_monitor_channel(websocket: WebSocket, channel: int):
                     
                     if channel in results:
                         channel_data = results[channel]
+                        
+                        # 로깅 활성화 여부 확인 후 채널별 테이블에 저장
+                        logged = False
+                        if logging_enabled.get(channel, True):
+                            save_to_database(channel_data)
+                            logged = True
+                        
                         data = {
                             "channel": channel,
+                            "table": f"channel_{channel}",
                             "voltage": channel_data.voltage,
                             "current": channel_data.current,
                             "power": channel_data.voltage * channel_data.current,
-                            "timestamp": channel_data.timestamp
+                            "timestamp": channel_data.timestamp,
+                            "logged": logged
                         }
                         await websocket.send_json(data)
                     else:
                         await websocket.send_json({
-                            "error": f"Channel {channel} measurement failed"
+                            "error": f"Channel {channel} measurement failed",
+                            "logged": False
                         })
                     
                 except Exception as e:
-                    await websocket.send_json({"error": str(e)})
+                    await websocket.send_json({
+                        "error": str(e),
+                        "logged": False
+                    })
             else:
-                await websocket.send_json({"error": "Not connected"})
+                await websocket.send_json({
+                    "error": "Not connected",
+                    "logged": False
+                })
             
             # 고속 업데이트 (100ms = 10Hz)
             await asyncio.sleep(0.1)
@@ -399,7 +449,7 @@ async def websocket_monitor_channel(websocket: WebSocket, channel: int):
         print(f"Active channels: {sorted(active_channels)}")
 
 
-# ========== 활성 연결 상태 확인 API ==========
+# ========== WebSocket 상태 확인 ==========
 
 @app.get("/ws/status")
 async def get_websocket_status():
@@ -407,53 +457,67 @@ async def get_websocket_status():
     return {
         "active_channels": sorted(list(active_channels)),
         "total_connections": len(active_channels),
-        "connected": driver.is_connected() if driver else False
+        "connected": driver.is_connected() if driver else False,
+        "logging_config": logging_enabled,
+        "tables": {ch: f"channel_{ch}" for ch in [1, 2, 3]}
     }
 
-# ========== 데이터 로그 조회 API ==========
+
+# ========== 로그 조회 API (채널별 테이블) ==========
 
 @app.get("/logs/recent")
 async def get_recent_logs(limit: int = 100):
-    """최근 로그 조회"""
+    """전체 채널의 최근 로그 조회 (각 채널별 테이블에서 조회)"""
     try:
         conn = sqlite3.connect(db_path)
         cursor = conn.cursor()
         
-        cursor.execute("""
-            SELECT timestamp, datetime, channel, voltage, current, power
-            FROM measurement_logs
-            ORDER BY timestamp DESC
-            LIMIT ?
-        """, (limit,))
+        all_logs = []
         
-        rows = cursor.fetchall()
+        # 각 채널 테이블에서 로그 조회
+        for channel in [1, 2, 3]:
+            table_name = f"channel_{channel}"
+            
+            cursor.execute(f"""
+                SELECT timestamp, datetime, voltage, current, power
+                FROM {table_name}
+                ORDER BY timestamp DESC
+                LIMIT ?
+            """, (limit,))
+            
+            rows = cursor.fetchall()
+            
+            for row in rows:
+                all_logs.append({
+                    "channel": channel,
+                    "table": table_name,
+                    "timestamp": row[0],
+                    "datetime": row[1],
+                    "voltage": row[2],
+                    "current": row[3],
+                    "power": row[4]
+                })
+        
+        # 타임스탬프로 정렬
+        all_logs.sort(key=lambda x: x['timestamp'], reverse=True)
+        all_logs = all_logs[:limit]
+        
         conn.close()
         
-        logs = []
-        for row in rows:
-            logs.append({
-                "timestamp": row[0],
-                "datetime": row[1],
-                "channel": row[2],
-                "voltage": row[3],
-                "current": row[4],
-                "power": row[5]
-            })
-        
-        return {"count": len(logs), "logs": logs}
+        return {"count": len(all_logs), "logs": all_logs}
         
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
 
-@app.get("/logs/{channel}")
+@app.get("/logs/channel/{channel}")
 async def get_channel_logs(
     channel: int, 
     limit: int = 100,
     start_time: Optional[float] = None,
     end_time: Optional[float] = None
 ):
-    """특정 채널 로그 조회"""
+    """특정 채널 로그 조회 (채널별 독립 테이블)"""
     if not 1 <= channel <= 3:
         raise HTTPException(status_code=400, detail="Invalid channel (1-3)")
     
@@ -461,12 +525,14 @@ async def get_channel_logs(
         conn = sqlite3.connect(db_path)
         cursor = conn.cursor()
         
-        query = """
+        table_name = f"channel_{channel}"
+        
+        query = f"""
             SELECT timestamp, datetime, voltage, current, power
-            FROM measurement_logs
-            WHERE channel = ?
+            FROM {table_name}
+            WHERE 1=1
         """
-        params = [channel]
+        params = []
         
         if start_time:
             query += " AND timestamp >= ?"
@@ -493,10 +559,50 @@ async def get_channel_logs(
                 "power": row[4]
             })
         
-        return {"channel": channel, "count": len(logs), "logs": logs}
+        return {
+            "channel": channel,
+            "table": table_name,
+            "count": len(logs),
+            "logs": logs
+        }
         
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.delete("/logs/clear")
+async def clear_logs(channel: Optional[int] = None):
+    """로그 삭제 (채널별 테이블 또는 전체)"""
+    try:
+        conn = sqlite3.connect(db_path)
+        cursor = conn.cursor()
+        
+        if channel is not None:
+            if not 1 <= channel <= 3:
+                raise HTTPException(status_code=400, detail="Invalid channel (1-3)")
+            
+            table_name = f"channel_{channel}"
+            cursor.execute(f"DELETE FROM {table_name}")
+            message = f"Channel {channel} logs cleared (table: {table_name})"
+        else:
+            # 전체 채널 삭제
+            for ch in [1, 2, 3]:
+                cursor.execute(f"DELETE FROM channel_{ch}")
+            message = "All channel logs cleared"
+        
+        deleted_count = cursor.rowcount
+        conn.commit()
+        conn.close()
+        
+        return {
+            "status": "success",
+            "message": message,
+            "deleted_count": deleted_count
+        }
+        
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
 
 
 if __name__ == "__main__":
