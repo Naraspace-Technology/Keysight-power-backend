@@ -10,7 +10,7 @@ import sqlite3
 from pathlib import Path
 import os
 
-from keysight_driver import KeysightE36313ADriver, ChannelData
+from driver.keysight_driver import KeysightE36313ADriver, ChannelData
 
 # ========== 전역 변수 ==========
 driver: Optional[KeysightE36313ADriver] = None

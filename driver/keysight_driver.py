@@ -102,14 +102,6 @@ class KeysightE36313ADriver:
     # ========== 측정 함수 ==========
     
     def measure_voltage(self, channel: int) -> Optional[float]:
-        """개별 채널 전압 측정
-        
-        Args:
-            channel: 채널 번호 (1-3)
-            
-        Returns:
-            측정 전압 (V)
-        """
         try:
             if not 1 <= channel <= 3:
                 raise ValueError(f"Invalid channel: {channel}")
@@ -122,14 +114,6 @@ class KeysightE36313ADriver:
             return None
     
     def measure_current(self, channel: int) -> Optional[float]:
-        """개별 채널 전류 측정
-        
-        Args:
-            channel: 채널 번호 (1-3)
-            
-        Returns:
-            측정 전류 (A)
-        """
         try:
             if not 1 <= channel <= 3:
                 raise ValueError(f"Invalid channel: {channel}")
@@ -140,78 +124,8 @@ class KeysightE36313ADriver:
         except Exception as e:
             logger.error(f"Current measurement error (CH{channel}): {e}")
             return None
-    '''
-    def measure_channel(self, channel: int) -> Optional[ChannelData]:
-        """개별 채널 전압/전류 동시 측정
-        
-        Args:
-            channel: 채널 번호 (1-3)
-            
-        Returns:
-            ChannelData 객체
-        """
-        try:
-            voltage = self.measure_voltage(channel)
-            current = self.measure_current(channel)
-            
-            if voltage is not None and current is not None:
-                return ChannelData(
-                    channel=channel,
-                    voltage=voltage,
-                    current=current,
-                    timestamp=time.time()
-                )
-            return None
-            
-        except Exception as e:
-            logger.error(f"Channel measurement error (CH{channel}): {e}")
-            return None
-    
-    def measure_all_channels(self) -> Dict[int, ChannelData]:
-        """전체 채널 일괄 측정
-        
-        Returns:
-            채널별 측정 데이터 딕셔너리
-        """
-        results = {}
-        timestamp = time.time()
-        
-        try:
-            # 채널 리스트 형태로 일괄 측정 (성능 최적화)
-            voltages = self.instrument.query("MEAS:VOLT? CH{ch}").strip().split(',')
-            currents = self.instrument.query("MEAS:CURR? CH{ch}").strip().split(',')
-            
-            for ch in range(1, 4):
-                try:
-                    results[ch] = ChannelData(
-                        channel=ch,
-                        voltage=float(voltages[ch-1]),
-                        current=float(currents[ch-1]),
-                        timestamp=timestamp
-                    )
-                except (IndexError, ValueError) as e:
-                    logger.error(f"Parse error for CH{ch}: {e}")
-                    
-        except Exception as e:
-            logger.error(f"Batch measurement error: {e}")
-            # Fallback: 개별 측정
-            for ch in range(1, 4):
-                data = self.measure_channel(ch)
-                if data:
-                    results[ch] = data
-        
-        return results
-    '''
 
     def measure_channel(self, channels: List[int]) -> Dict[int, ChannelData]:
-        """지정된 채널들 일괄 측정 (최적화 버전)
-        
-        Args:
-            channels: 측정할 채널 번호 리스트 (예: [1, 2, 3])
-            
-        Returns:
-            채널별 측정 데이터 딕셔너리
-        """
         results = {}
         timestamp = time.time()
         
@@ -249,25 +163,11 @@ class KeysightE36313ADriver:
         return results
 
     def measure_all_channel(self) -> Dict[int, ChannelData]:
-        """전체 채널 일괄 측정
-        
-        Returns:
-            채널별 측정 데이터 딕셔너리
-        """
         return self.measure_channel([1, 2, 3])
     
     # ========== 설정 함수 ==========
     
     def set_voltage(self, channel: int, voltage: float) -> bool:
-        """개별 채널 전압 설정
-        
-        Args:
-            channel: 채널 번호 (1-3)
-            voltage: 설정 전압 (V)
-            
-        Returns:
-            성공 여부
-        """
         try:
             if not 1 <= channel <= 3:
                 raise ValueError(f"Invalid channel: {channel}")
@@ -296,15 +196,6 @@ class KeysightE36313ADriver:
             return False
     
     def set_current(self, channel: int, current: float) -> bool:
-        """개별 채널 전류 제한 설정
-        
-        Args:
-            channel: 채널 번호 (1-3)
-            current: 설정 전류 (A)
-            
-        Returns:
-            성공 여부
-        """
         try:
             if not 1 <= channel <= 3:
                 raise ValueError(f"Invalid channel: {channel}")
@@ -333,15 +224,6 @@ class KeysightE36313ADriver:
             return False
     
     def set_output(self, channel: int, state: bool) -> bool:
-        """개별 채널 출력 ON/OFF
-        
-        Args:
-            channel: 채널 번호 (1-3)
-            state: True=ON, False=OFF
-            
-        Returns:
-            성공 여부
-        """
         try:
             if not 1 <= channel <= 3:
                 raise ValueError(f"Invalid channel: {channel}")
@@ -363,14 +245,6 @@ class KeysightE36313ADriver:
             return False
     
     def set_all_outputs(self, state: bool) -> Dict[int, bool]:
-        """전체 채널 출력 일괄 ON/OFF
-        
-        Args:
-            state: True=ON, False=OFF
-            
-        Returns:
-            채널별 성공 여부 딕셔너리
-        """
         results = {}
         for ch in range(1, 4):
             results[ch] = self.set_output(ch, state)
@@ -379,14 +253,6 @@ class KeysightE36313ADriver:
     # ========== 상태 확인 ==========
     
     def get_output_status(self, channel: int) -> Optional[bool]:
-        """채널 출력 상태 확인
-        
-        Args:
-            channel: 채널 번호 (1-3)
-            
-        Returns:
-            True=ON, False=OFF, None=에러
-        """
         try:
             status = int(self.instrument.query(f"OUTP? (@{channel})"))
             return status == 1
