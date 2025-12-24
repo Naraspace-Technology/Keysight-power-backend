@@ -1,5 +1,3 @@
-version: '3.8'
-
 services:
   backend:
     build:
@@ -10,39 +8,12 @@ services:
     ports:
       - "8000:8000"
     volumes:
-      # Hot-reload: 코드 변경 시 자동 반영
-      - ./keysight_driver.py:/app/keysight_driver.py
-      - ./main.py:/app/main.py
-      # Data persistence
-      - ./data:/app/data
       - ./logs:/app/logs
     environment:
       - PYTHONUNBUFFERED=1
       - LOG_LEVEL=DEBUG
       - DATABASE_PATH=/app/logs/power_supply_logs.db
       - PYTHONPATH=/app
-    networks:
-      - keysight-network
     
     # Development: uvicorn with reload
-    command: uvicorn main:app --host 0.0.0.0 --port 8000 --reload --log-level debug
-    
-    # Resource limits (less strict for dev)
-    deploy:
-      resources:
-        limits:
-          cpus: '2'
-          memory: 1G
-        reservations:
-          cpus: '0.25'
-          memory: 128M
-    
-    logging:
-      driver: "json-file"
-      options:
-        max-size: "5m"
-        max-file: "2"
-
-networks:
-  keysight-network:
-    driver: bridge
+    command: uvicorn main:app --host 0.0.0.0 --port 8000 --log-level debug
